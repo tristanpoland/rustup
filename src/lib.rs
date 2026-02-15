@@ -109,3 +109,63 @@ mod tests {
         );
     }
 }
+
+/// Public programmatic installation API.
+///
+/// Exposes rustup's internal install machinery for use as a library dependency,
+/// bypassing the CLI arg-parsing layer. Callers should spawn a dedicated thread
+/// since `install_rust_blocking` creates its own tokio runtime.
+pub mod installer {
+    use std::path::PathBuf;
+
+    use anyhow::{Result, anyhow};
+
+    use crate::{
+        cli::self_update::{self, InstallOpts},
+        config::Cfg,
+        dist::Profile,
+        process::Process,
+        utils::ExitCode,
+    };
+
+    /// Install Rust synchronously using rustup's standard installation flow.
+    ///
+    /// Internally spins up a multi-thread tokio runtime. Call this from a
+    /// dedicated `std::thread::spawn` to avoid conflicting with any existing
+    /// async executor (e.g. GPUI).
+    ///
+    /// - `no_prompt`: skip interactive confirmation (pass `true` for unattended installs)
+    /// - `no_modify_path`: when `false`, rustup adds `~/.cargo/bin` to the system PATH
+    pub fn install_rust_blocking(no_prompt: bool, no_modify_path: bool) -> Result<()> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let exit_code = rt.block_on(install_rust(no_prompt, no_modify_path))?;
+        if exit_code == ExitCode::SUCCESS {
+            Ok(())
+        } else {
+            Err(anyhow!("rustup install exited with code {}", exit_code.0))
+        }
+    }
+
+    /// Async version of the install flow. Requires an existing tokio runtime.
+    pub async fn install_rust(
+        no_prompt: bool,
+        no_modify_path: bool,
+    ) -> Result<ExitCode> {
+        let process = Process::os();
+        let current_dir =
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let mut cfg = Cfg::from_env(current_dir, no_prompt, &process)?;
+        let opts = InstallOpts {
+            default_host_triple: None,
+            default_toolchain: None,
+            profile: Profile::Default,
+            no_modify_path,
+            no_update_toolchain: false,
+            components: &[],
+            targets: &[],
+        };
+        self_update::install(no_prompt, opts, &mut cfg).await
+    }
+}
